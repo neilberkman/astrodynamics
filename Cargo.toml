@@ -1,0 +1,20 @@
+[package]
+name = "astrodynamics"
+version = "0.5.0"
+authors = []
+edition = "2021"
+description = "Numerical astrodynamics engine for orbit propagation, force models, and flight-dynamics primitives"
+license = "MIT"
+readme = "README.md"
+documentation = "https://docs.rs/astrodynamics"
+homepage = "https://github.com/neilberkman/astrodynamics"
+repository = "https://github.com/neilberkman/astrodynamics"
+keywords = ["astrodynamics", "orbital-mechanics", "satellite", "propagation"]
+categories = ["science", "simulation"]
+
+[dependencies]
+nalgebra = "0.33"
+thiserror = "1.0"
+
+[dev-dependencies]
+approx = "0.5"
