@@ -22,6 +22,74 @@ pub mod propagator;
 pub mod integrators;
 pub mod forces;
 pub mod events;
+pub mod sgp4;
+
+#[cfg(feature = "sgp4-debug-oracle")]
+#[doc(hidden)]
+pub mod sgp4_cpp_oracle {
+    //! Test-only oracle bridge to the Vallado C++ implementation.
+    //! Compiled in only when the `sgp4-debug-oracle` feature is on.
+    //! Not part of the public API.
+
+    use std::os::raw::{c_char, c_double, c_int};
+
+    pub const CPP_DUMP_DOUBLE_COUNT: usize = 112;
+    pub const CPP_DUMP_INT_COUNT: usize = 5;
+
+    extern "C" {
+        pub fn cpp_sgp4init_dump(
+            satnum: *const c_char,
+            epoch_sgp4: c_double,
+            bstar: c_double,
+            ndot: c_double,
+            nddot: c_double,
+            ecco: c_double,
+            argpo: c_double,
+            inclo: c_double,
+            mo: c_double,
+            no_kozai: c_double,
+            nodeo: c_double,
+            epochyr: c_int,
+            epochdays: c_double,
+            jdsatepoch: c_double,
+            jdsatepoch_frac: c_double,
+            double_out: *mut c_double,
+            int_out: *mut c_int,
+        ) -> c_int;
+
+        pub fn cpp_sgp4_step(
+            satnum: *const c_char,
+            epoch_sgp4: c_double,
+            bstar: c_double,
+            ndot: c_double,
+            nddot: c_double,
+            ecco: c_double,
+            argpo: c_double,
+            inclo: c_double,
+            mo: c_double,
+            no_kozai: c_double,
+            nodeo: c_double,
+            epochyr: c_int,
+            epochdays: c_double,
+            jdsatepoch: c_double,
+            jdsatepoch_frac: c_double,
+            tsince: c_double,
+            r_out: *mut c_double,
+            v_out: *mut c_double,
+        ) -> c_int;
+    }
+
+    /// Force-reference the C symbols so the linker pulls in the static lib.
+    /// Without this, the rlib has no use of the symbols and the linker
+    /// strips the entire archive when compiling integration tests.
+    #[doc(hidden)]
+    pub fn force_link_oracle() -> usize {
+        cpp_sgp4init_dump as usize ^ cpp_sgp4_step as usize
+    }
+}
+
+#[cfg(feature = "sgp4-debug-oracle")]
+pub use sgp4_cpp_oracle::cpp_sgp4_step;
 
 pub use error::PropagationError;
 pub use state::CartesianState;

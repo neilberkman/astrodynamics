@@ -1,6 +1,6 @@
 [package]
 name = "astrodynamics"
-version = "0.5.0"
+version = "0.6.0"
 authors = []
 edition = "2021"
 description = "Numerical astrodynamics engine for orbit propagation, force models, and flight-dynamics primitives"
@@ -15,6 +15,18 @@ categories = ["science", "simulation"]
 [dependencies]
 nalgebra = "0.33"
 thiserror = "1.0"
+serde = { version = "1", features = ["derive"], optional = true }
+
+[build-dependencies]
+cc = "1"
 
 [dev-dependencies]
 approx = "0.5"
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[features]
+default = ["serde"]
+# Test-only oracle. Compiles Vallado C++ via cc and exposes it to the test
+# suite for field-level diffing against the pure-Rust SGP4 port. Not part
+# of the public API. Off by default.
+sgp4-debug-oracle = []
