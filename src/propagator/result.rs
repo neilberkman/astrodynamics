@@ -1,5 +1,6 @@
 use crate::state::CartesianState;
 use crate::events::DetectedEvent;
+use crate::propagator::dense_output::DenseOutput;
 
 #[derive(Debug, Clone)]
 pub struct PropagationPoint {
@@ -21,4 +22,5 @@ pub struct PropagationResult {
     pub points: Vec<PropagationPoint>,
     pub events: Vec<DetectedEvent>,
     pub stats: PropagationStats,
+    pub dense: Option<DenseOutput>,
 }

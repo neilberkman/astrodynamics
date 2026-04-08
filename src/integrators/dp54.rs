@@ -2,6 +2,7 @@ use crate::state::{CartesianState, StateDerivative};
 use crate::propagator::api::{PropagationContext, IntegratorOptions};
 use crate::propagator::result::{PropagationResult, PropagationPoint, PropagationStats};
 use crate::propagator::controller::PIController;
+use crate::propagator::dense_output::{DenseOutput, DenseSegment};
 use crate::error::PropagationError;
 use crate::integrators::{Integrator, DynamicsModel};
 use crate::integrators::tableau::DP54Tableau;
@@ -19,8 +20,10 @@ impl Integrator for DP54 {
         opts: &IntegratorOptions,
     ) -> Result<PropagationResult, PropagationError> {
         let tableau = DP54Tableau::default();
-        let mut controller = PIController::default();
-        controller.order = 5.0;
+        let controller = PIController {
+            order: 5.0,
+            ..PIController::default()
+        };
         
         let mut state = initial;
         let mut t = initial.epoch_tdb_seconds;
@@ -33,6 +36,7 @@ impl Integrator for DP54 {
         let mut steps_rejected = 0;
         let mut evals = 0;
         let mut points = Vec::new();
+        let mut dense_segments = Vec::new();
 
         points.push(PropagationPoint {
             epoch_tdb_seconds: t,
@@ -55,23 +59,38 @@ impl Integrator for DP54 {
             }
 
             // Step using DP54
-            let (next_state, k_fsal, r_err, v_err, step_evals) = self.step(state, h_step, k1, rhs, ctx, &tableau)?;
+            let step_res = self.step(state, h_step, k1, rhs, ctx, &tableau, opts.dense_output)?;
             
             // Error estimation
-            let r_scale = opts.abs_tol + state.position_km.norm().max(next_state.position_km.norm()) * opts.rel_tol;
-            let v_scale = opts.abs_tol + state.velocity_km_s.norm().max(next_state.velocity_km_s.norm()) * opts.rel_tol;
+            let r_scale = opts.abs_tol + state.position_km.norm().max(step_res.next_state.position_km.norm()) * opts.rel_tol;
+            let v_scale = opts.abs_tol + state.velocity_km_s.norm().max(step_res.next_state.velocity_km_s.norm()) * opts.rel_tol;
             
-            let err_r = r_err.norm() / r_scale;
-            let err_v = v_err.norm() / v_scale;
+            let err_r = step_res.r_err.norm() / r_scale;
+            let err_v = step_res.v_err.norm() / v_scale;
             let err = err_r.max(err_v);
 
             if err <= 1.0 {
                 // Accepted
-                state = next_state;
+                if opts.dense_output {
+                    if let Some(stages) = step_res.stages {
+                        let ks_array: [StateDerivative; 7] = stages.try_into().map_err(|_| {
+                            PropagationError::NumericalFailure("Failed to capture RK stages".to_string())
+                        })?;
+                        dense_segments.push(DenseSegment::from_dp54_stages(
+                            t,
+                            h_step,
+                            state,
+                            step_res.next_state,
+                            &ks_array,
+                        ));
+                    }
+                }
+
+                state = step_res.next_state;
                 t += h_step;
-                k1 = k_fsal; // FSAL
+                k1 = step_res.k_fsal; // FSAL
                 steps_accepted += 1;
-                evals += step_evals;
+                evals += step_res.evals;
                 
                 if opts.dense_output {
                     points.push(PropagationPoint {
@@ -84,7 +103,7 @@ impl Integrator for DP54 {
                 h = controller.next_step(h_step, err);
             } else {
                 steps_rejected += 1;
-                evals += step_evals - 1;
+                evals += step_res.evals - 1;
                 h = controller.next_step(h_step, err);
                 
                 if h.abs() < opts.min_step {
@@ -101,6 +120,12 @@ impl Integrator for DP54 {
             });
         }
 
+        let dense = if opts.dense_output {
+            Some(DenseOutput { segments: dense_segments })
+        } else {
+            None
+        };
+
         Ok(PropagationResult {
             final_state: state,
             points,
@@ -110,11 +135,22 @@ impl Integrator for DP54 {
                 rejected_steps: steps_rejected,
                 evaluations: evals,
             },
+            dense,
         })
     }
 }
 
+struct DP54Step {
+    next_state: CartesianState,
+    k_fsal: StateDerivative,
+    r_err: Vector3<f64>,
+    v_err: Vector3<f64>,
+    evals: u32,
+    stages: Option<Vec<StateDerivative>>,
+}
+
 impl DP54 {
+    #[allow(clippy::too_many_arguments)]
     fn step(
         &self,
         state: CartesianState,
@@ -123,16 +159,17 @@ impl DP54 {
         rhs: &dyn DynamicsModel,
         ctx: &PropagationContext,
         tableau: &DP54Tableau,
-    ) -> Result<(CartesianState, StateDerivative, Vector3<f64>, Vector3<f64>, u32), PropagationError> {
+        capture_stages: bool,
+    ) -> Result<DP54Step, PropagationError> {
         let mut ks = Vec::with_capacity(7);
         ks.push(k1);
 
         for i in 1..6 {
             let mut dpos = Vector3::zeros();
             let mut dvel = Vector3::zeros();
-            for j in 0..i {
-                dpos += ks[j].dpos_km_s * tableau.a[i][j];
-                dvel += ks[j].dvel_km_s2 * tableau.a[i][j];
+            for (j, k) in ks.iter().enumerate().take(i) {
+                dpos += k.dpos_km_s * tableau.a[i][j];
+                dvel += k.dvel_km_s2 * tableau.a[i][j];
             }
             
             let stage_state = CartesianState {
@@ -146,9 +183,9 @@ impl DP54 {
         // 5th order solution
         let mut dpos5 = Vector3::zeros();
         let mut dvel5 = Vector3::zeros();
-        for i in 0..6 {
-            dpos5 += ks[i].dpos_km_s * tableau.b5[i];
-            dvel5 += ks[i].dvel_km_s2 * tableau.b5[i];
+        for (i, k) in ks.iter().enumerate().take(6) {
+            dpos5 += k.dpos_km_s * tableau.b5[i];
+            dvel5 += k.dvel_km_s2 * tableau.b5[i];
         }
 
         let next_state = CartesianState {
@@ -164,14 +201,27 @@ impl DP54 {
         // 4th order for error estimate
         let mut dpos4 = Vector3::zeros();
         let mut dvel4 = Vector3::zeros();
-        for i in 0..7 {
-            dpos4 += ks[i].dpos_km_s * tableau.b4[i];
-            dvel4 += ks[i].dvel_km_s2 * tableau.b4[i];
+        for (i, k) in ks.iter().enumerate().take(7) {
+            dpos4 += k.dpos_km_s * tableau.b4[i];
+            dvel4 += k.dvel_km_s2 * tableau.b4[i];
         }
 
         let r_err = (dpos5 - dpos4) * h;
         let v_err = (dvel5 - dvel4) * h;
 
-        Ok((next_state, k_fsal, r_err, v_err, 6))
+        let stages = if capture_stages {
+            Some(ks)
+        } else {
+            None
+        };
+
+        Ok(DP54Step {
+            next_state,
+            k_fsal,
+            r_err,
+            v_err,
+            evals: 6,
+            stages,
+        })
     }
 }

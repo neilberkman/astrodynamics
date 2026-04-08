@@ -72,6 +72,7 @@ impl Integrator for RK4 {
                 rejected_steps: 0,
                 evaluations: steps * 4,
             },
+            dense: None,
         })
     }
 }
