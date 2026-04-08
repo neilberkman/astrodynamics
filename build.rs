@@ -15,6 +15,21 @@ fn main() {
         return;
     }
 
+    // The Vallado C++ source lives only in the git checkout — it is excluded
+    // from the published tarball to keep the crate pure-Rust at the surface.
+    // If a user enables `--features sgp4-debug-oracle` on a tarball-installed
+    // copy of the crate, the source files won't be present. Skip gracefully
+    // with a clear message instead of hard-failing the build.
+    if !std::path::Path::new("tests/cpp/SGP4.cpp").exists() {
+        println!(
+            "cargo:warning=astrodynamics: the `sgp4-debug-oracle` feature requires \
+             the Vallado C++ source files in tests/cpp/, which are excluded from \
+             the published crate. Clone the repo at \
+             https://github.com/neilberkman/astrodynamics to use this feature."
+        );
+        return;
+    }
+
     println!("cargo:rerun-if-changed=tests/cpp/SGP4.cpp");
     println!("cargo:rerun-if-changed=tests/cpp/SGP4.h");
     println!("cargo:rerun-if-changed=tests/cpp/sgp4_dump_wrapper.cpp");
