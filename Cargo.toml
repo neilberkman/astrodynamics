@@ -1,6 +1,6 @@
 [package]
 name = "astrodynamics"
-version = "0.6.2"
+version = "0.6.3"
 authors = []
 edition = "2021"
 description = "Numerical astrodynamics engine for orbit propagation, force models, and flight-dynamics primitives"
