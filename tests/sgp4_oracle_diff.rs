@@ -189,11 +189,13 @@ fn run_satellite(norad_target: &str) {
     eprintln!("[{norad_target}] cpp sgp4init returned error code {cpp_err}");
 
     // ── Run our Rust port ─────────────────────────────────────────
-    let mut satrec = vallado::ElsetRec::default();
-    satrec.epochyr = two_digit_year;
-    satrec.epochdays = epochdays;
-    satrec.jdsatepoch = jdsatepoch;
-    satrec.jdsatepochF = jdsatepoch_f;
+    let mut satrec = vallado::ElsetRec {
+        epochyr: two_digit_year,
+        epochdays,
+        jdsatepoch,
+        jdsatepochF: jdsatepoch_f,
+        ..vallado::ElsetRec::default()
+    };
     vallado::sgp4init(
         vallado::GravConstType::Wgs72,
         'i',
@@ -316,11 +318,13 @@ fn diff_sgp4_step_at_nonzero_tsince() {
         let satnum_c = std::ffi::CString::new(satnum_str).unwrap();
 
         // ── Rust path: init + step ─────────────────────────────────────
-        let mut satrec = vallado::ElsetRec::default();
-        satrec.epochyr = two_digit_year;
-        satrec.epochdays = epochdays;
-        satrec.jdsatepoch = jdsatepoch;
-        satrec.jdsatepochF = jdsatepoch_f;
+        let mut satrec = vallado::ElsetRec {
+            epochyr: two_digit_year,
+            epochdays,
+            jdsatepoch,
+            jdsatepochF: jdsatepoch_f,
+            ..vallado::ElsetRec::default()
+        };
         vallado::sgp4init(
             vallado::GravConstType::Wgs72, 'i', satnum_str, epoch_sgp4,
             bstar, ndot, nddot, ecco, argpo, inclo, mo, no_kozai, nodeo,

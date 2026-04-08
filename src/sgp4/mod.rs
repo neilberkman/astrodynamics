@@ -93,23 +93,18 @@ pub struct JulianDate(pub f64, pub f64);
 /// `sgp4init` follows. The two modes produce subtly different results;
 /// the divergence grows with propagation time and can reach hundreds of
 /// millimeters over a few orbits at LEO.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum OpsMode {
     /// Improved formulation (Vallado `'i'`). Default for new work and
     /// matches the default of Python's `sgp4` package. Recommended unless
     /// you specifically need AFSPC operational parity.
+    #[default]
     Improved,
     /// AFSPC operational compatibility mode (Vallado `'a'`). Use this
     /// when reproducing outputs from operational AFSPC systems or matching
     /// reference values from older crates / catalogs that ran in AFSPC mode.
     Afspc,
-}
-
-impl Default for OpsMode {
-    fn default() -> Self {
-        OpsMode::Improved
-    }
 }
 
 impl OpsMode {
@@ -415,11 +410,13 @@ fn init_satrec_from_elements(
 
     let satnum_str = format!("{:>5}", elements.catalog_number);
 
-    let mut satrec = vallado::ElsetRec::default();
-    satrec.epochyr = elements.epoch_year_two_digit;
-    satrec.epochdays = elements.epoch_days;
-    satrec.jdsatepoch = jd;
-    satrec.jdsatepochF = jdfrac;
+    let mut satrec = vallado::ElsetRec {
+        epochyr: elements.epoch_year_two_digit,
+        epochdays: elements.epoch_days,
+        jdsatepoch: jd,
+        jdsatepochF: jdfrac,
+        ..vallado::ElsetRec::default()
+    };
 
     vallado::sgp4init(
         vallado::GravConstType::Wgs72,
@@ -530,11 +527,13 @@ fn init_satrec_from_tle(
 
     let satnum = l1[2..7].trim();
 
-    let mut satrec = vallado::ElsetRec::default();
-    satrec.epochyr = two_digit_year;
-    satrec.epochdays = epochdays;
-    satrec.jdsatepoch = jd;
-    satrec.jdsatepochF = jdfrac;
+    let mut satrec = vallado::ElsetRec {
+        epochyr: two_digit_year,
+        epochdays,
+        jdsatepoch: jd,
+        jdsatepochF: jdfrac,
+        ..vallado::ElsetRec::default()
+    };
 
     vallado::sgp4init(
         vallado::GravConstType::Wgs72,

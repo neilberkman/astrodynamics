@@ -4,13 +4,14 @@ use crate::propagator::api::PropagationContext;
 use crate::error::PropagationError;
 use crate::forces::r#trait::ForceModel;
 
+#[derive(Default)]
 pub struct CompositeForceModel {
     pub models: Vec<Box<dyn ForceModel>>,
 }
 
 impl CompositeForceModel {
     pub fn new() -> Self {
-        Self { models: Vec::new() }
+        Self::default()
     }
 
     pub fn add(&mut self, model: Box<dyn ForceModel>) {
