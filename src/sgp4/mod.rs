@@ -89,6 +89,38 @@ pub struct Prediction {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct JulianDate(pub f64, pub f64);
 
+/// Vallado SGP4 operation mode. Controls which initialization branch
+/// `sgp4init` follows. The two modes produce subtly different results;
+/// the divergence grows with propagation time and can reach hundreds of
+/// millimeters over a few orbits at LEO.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum OpsMode {
+    /// Improved formulation (Vallado `'i'`). Default for new work and
+    /// matches the default of Python's `sgp4` package. Recommended unless
+    /// you specifically need AFSPC operational parity.
+    Improved,
+    /// AFSPC operational compatibility mode (Vallado `'a'`). Use this
+    /// when reproducing outputs from operational AFSPC systems or matching
+    /// reference values from older crates / catalogs that ran in AFSPC mode.
+    Afspc,
+}
+
+impl Default for OpsMode {
+    fn default() -> Self {
+        OpsMode::Improved
+    }
+}
+
+impl OpsMode {
+    fn as_char(self) -> char {
+        match self {
+            OpsMode::Improved => 'i',
+            OpsMode::Afspc => 'a',
+        }
+    }
+}
+
 /// Pre-parsed Vallado SGP4 element set.
 ///
 /// Use this when the TLE has already been parsed externally (e.g. from an
@@ -158,13 +190,25 @@ impl std::fmt::Debug for Satellite {
 }
 
 impl Satellite {
-    /// Parse a two-line element set.
+    /// Parse a two-line element set using the default `Improved` opsmode.
     ///
     /// Lines should be the standard 69-character TLE format. Leading and
     /// trailing whitespace is trimmed before length validation. Runs the full
     /// SGP4 initialization (`sgp4init`) once and caches the resulting state
     /// so propagation calls are pure step kernels.
     pub fn from_tle(line1: &str, line2: &str) -> Result<Self, Error> {
+        Self::from_tle_with_opsmode(line1, line2, OpsMode::Improved)
+    }
+
+    /// Parse a two-line element set with an explicit `OpsMode`.
+    ///
+    /// Use `OpsMode::Afspc` to reproduce results from operational AFSPC
+    /// systems or older crates that ran in AFSPC compatibility mode.
+    pub fn from_tle_with_opsmode(
+        line1: &str,
+        line2: &str,
+        opsmode: OpsMode,
+    ) -> Result<Self, Error> {
         let l1 = line1.trim();
         let l2 = line2.trim();
 
@@ -179,7 +223,7 @@ impl Satellite {
             ));
         }
 
-        let satrec = init_satrec_from_tle(l1, l2)?;
+        let satrec = init_satrec_from_tle(l1, l2, opsmode)?;
 
         Ok(Satellite {
             line1: l1.to_string(),
@@ -188,7 +232,8 @@ impl Satellite {
         })
     }
 
-    /// Construct a `Satellite` from pre-parsed Vallado SGP4 elements.
+    /// Construct a `Satellite` from pre-parsed Vallado SGP4 elements using
+    /// the default `Improved` opsmode.
     ///
     /// Useful when TLE data has already been parsed externally (OMM, JSON
     /// catalog, another system) and you only need the element values to flow
@@ -198,7 +243,16 @@ impl Satellite {
     /// Note: a `Satellite` constructed this way has empty `line1()` and
     /// `line2()` accessors since there is no source TLE to return.
     pub fn from_elements(elements: &ElementSet) -> Result<Self, Error> {
-        let satrec = init_satrec_from_elements(elements)?;
+        Self::from_elements_with_opsmode(elements, OpsMode::Improved)
+    }
+
+    /// Construct a `Satellite` from pre-parsed elements with an explicit
+    /// `OpsMode`. See `from_tle_with_opsmode` for the rationale.
+    pub fn from_elements_with_opsmode(
+        elements: &ElementSet,
+        opsmode: OpsMode,
+    ) -> Result<Self, Error> {
+        let satrec = init_satrec_from_elements(elements, opsmode)?;
         Ok(Satellite {
             line1: String::new(),
             line2: String::new(),
@@ -263,7 +317,8 @@ impl Satellite {
     }
 }
 
-/// One-shot SGP4 propagation from pre-parsed elements.
+/// One-shot SGP4 propagation from pre-parsed elements using the default
+/// `Improved` opsmode.
 ///
 /// Equivalent to `Satellite::from_elements(&e)?.propagate(t)` but without
 /// allocating a cached `Satellite`. Suitable for one-call use cases where
@@ -273,7 +328,16 @@ pub fn propagate_elements(
     elements: &ElementSet,
     t: MinutesSinceEpoch,
 ) -> Result<Prediction, Error> {
-    let mut satrec = init_satrec_from_elements(elements)?;
+    propagate_elements_with_opsmode(elements, t, OpsMode::Improved)
+}
+
+/// One-shot SGP4 propagation with an explicit `OpsMode`.
+pub fn propagate_elements_with_opsmode(
+    elements: &ElementSet,
+    t: MinutesSinceEpoch,
+    opsmode: OpsMode,
+) -> Result<Prediction, Error> {
+    let mut satrec = init_satrec_from_elements(elements, opsmode)?;
     let mut r = [0.0_f64; 3];
     let mut v = [0.0_f64; 3];
     let ok = vallado::sgp4(&mut satrec, t.0, &mut r, &mut v);
@@ -318,7 +382,10 @@ impl<'de> serde::Deserialize<'de> for Satellite {
 /// satellite record. Performs the same angle/units conversion as
 /// `vallado::twoline2rv_propagate` so a `Satellite` constructed from
 /// elements is equivalent to one constructed from the matching TLE.
-fn init_satrec_from_elements(elements: &ElementSet) -> Result<vallado::ElsetRec, Error> {
+fn init_satrec_from_elements(
+    elements: &ElementSet,
+    opsmode: OpsMode,
+) -> Result<vallado::ElsetRec, Error> {
     let deg2rad = std::f64::consts::PI / 180.0;
     let xpdotp = 1440.0 / (2.0 * std::f64::consts::PI);
 
@@ -356,7 +423,7 @@ fn init_satrec_from_elements(elements: &ElementSet) -> Result<vallado::ElsetRec,
 
     vallado::sgp4init(
         vallado::GravConstType::Wgs72,
-        'i',
+        opsmode.as_char(),
         &satnum_str,
         epoch_sgp4,
         elements.bstar,
@@ -380,7 +447,11 @@ fn init_satrec_from_elements(elements: &ElementSet) -> Result<vallado::ElsetRec,
 
 /// Parse a TLE and run `sgp4init`, returning the initialized satellite
 /// record. Mirrors the parse logic in `vallado::twoline2rv_propagate` exactly.
-fn init_satrec_from_tle(line1: &str, line2: &str) -> Result<vallado::ElsetRec, Error> {
+fn init_satrec_from_tle(
+    line1: &str,
+    line2: &str,
+    opsmode: OpsMode,
+) -> Result<vallado::ElsetRec, Error> {
     let l1 = line1.trim_end();
     let l2 = line2.trim_end();
     if l1.len() < 64 || l2.len() < 68 {
@@ -467,7 +538,7 @@ fn init_satrec_from_tle(line1: &str, line2: &str) -> Result<vallado::ElsetRec, E
 
     vallado::sgp4init(
         vallado::GravConstType::Wgs72,
-        'i',
+        opsmode.as_char(),
         satnum,
         epoch_sgp4,
         bstar,

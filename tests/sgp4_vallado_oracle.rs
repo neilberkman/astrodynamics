@@ -5,7 +5,7 @@
 //! bit-for-bit (0 ULP) on every component.
 
 use astrodynamics::sgp4::{
-    propagate_elements, ElementSet, JulianDate, MinutesSinceEpoch, Satellite,
+    propagate_elements, ElementSet, JulianDate, MinutesSinceEpoch, OpsMode, Satellite,
 };
 
 fn hex_to_f64(s: &str) -> f64 {
@@ -251,6 +251,46 @@ fn from_elements_matches_from_tle_bit_exact() {
         total_checks * 2,
         mismatches.iter().take(20).cloned().collect::<Vec<_>>().join("\n")
     );
+}
+
+/// Sanity check that AFSPC and Improved opsmodes produce *different* results
+/// for at least some satellites. The two modes are not bit-equivalent — if
+/// they ever produce identical output across the entire fixture, our opsmode
+/// plumbing is broken (likely passing the same char in both branches).
+#[test]
+fn opsmode_afspc_differs_from_improved_for_some_sats() {
+    let data: serde_json::Value =
+        serde_json::from_str(include_str!("sgp4_verification.json")).unwrap();
+
+    let mut any_diff = false;
+    for sat in data["satellites"].as_array().unwrap() {
+        let line1 = sat["line1"].as_str().unwrap();
+        let line2 = sat["line2"].as_str().unwrap();
+        let imp = Satellite::from_tle_with_opsmode(line1, line2, OpsMode::Improved).unwrap();
+        let afspc = Satellite::from_tle_with_opsmode(line1, line2, OpsMode::Afspc).unwrap();
+
+        for prop in sat["propagations"].as_array().unwrap() {
+            if prop.get("error").is_some() {
+                continue;
+            }
+            let tsince = prop["tsince"].as_f64().unwrap();
+            let pi = imp.propagate(MinutesSinceEpoch(tsince));
+            let pa = afspc.propagate(MinutesSinceEpoch(tsince));
+            if let (Ok(i), Ok(a)) = (pi, pa) {
+                if i.position[0].to_bits() != a.position[0].to_bits()
+                    || i.position[1].to_bits() != a.position[1].to_bits()
+                    || i.position[2].to_bits() != a.position[2].to_bits()
+                {
+                    any_diff = true;
+                    break;
+                }
+            }
+        }
+        if any_diff {
+            break;
+        }
+    }
+    assert!(any_diff, "AFSPC and Improved produced identical output for ALL fixture rows — opsmode plumbing is broken");
 }
 
 #[test]
