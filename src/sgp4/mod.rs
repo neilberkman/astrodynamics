@@ -89,6 +89,48 @@ pub struct Prediction {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct JulianDate(pub f64, pub f64);
 
+/// Pre-parsed Vallado SGP4 element set.
+///
+/// Use this when the TLE has already been parsed externally (e.g. from an
+/// OMM message, JSON catalog, or another system) and you want to feed the
+/// element values directly into the SGP4 initializer instead of going through
+/// the TLE string parser.
+///
+/// Field units match the Vallado SGP4 reference inputs:
+/// angles in **degrees**, mean motion in **revolutions per day**, drag term
+/// in the dimensionless TLE convention.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ElementSet {
+    /// Two-digit epoch year as it appears in the TLE. Years 0..=56 are
+    /// interpreted as 2000..=2056; 57..=99 as 1957..=1999.
+    pub epoch_year_two_digit: i32,
+    /// Day of year, fractional. e.g. `184.80969102` for 2018-07-04 19:25 UTC.
+    pub epoch_days: f64,
+    /// SGP4 drag term (Vallado B\*). Dimensionless TLE convention.
+    pub bstar: f64,
+    /// First derivative of mean motion in rev/day². TLE "ndot".
+    pub mean_motion_dot: f64,
+    /// Second derivative of mean motion in rev/day³. TLE "nddot".
+    pub mean_motion_double_dot: f64,
+    /// Eccentricity, dimensionless, in [0, 1).
+    pub eccentricity: f64,
+    /// Argument of perigee, degrees.
+    pub argument_of_perigee_deg: f64,
+    /// Inclination, degrees.
+    pub inclination_deg: f64,
+    /// Mean anomaly, degrees.
+    pub mean_anomaly_deg: f64,
+    /// Mean motion, revolutions per day.
+    pub mean_motion_rev_per_day: f64,
+    /// Right ascension of ascending node (RAAN), degrees.
+    pub right_ascension_deg: f64,
+    /// Catalog (NORAD) number for this object. Used only for diagnostic
+    /// reporting inside SGP4 — propagation results do not depend on it.
+    /// Pass `0` if unknown.
+    pub catalog_number: u32,
+}
+
 // ── Satellite ────────────────────────────────────────────────────────
 
 /// A parsed TLE ready for propagation.
@@ -146,6 +188,24 @@ impl Satellite {
         })
     }
 
+    /// Construct a `Satellite` from pre-parsed Vallado SGP4 elements.
+    ///
+    /// Useful when TLE data has already been parsed externally (OMM, JSON
+    /// catalog, another system) and you only need the element values to flow
+    /// into SGP4 initialization. Equivalent to `from_tle` for propagation
+    /// behavior, but bypasses the TLE string parser.
+    ///
+    /// Note: a `Satellite` constructed this way has empty `line1()` and
+    /// `line2()` accessors since there is no source TLE to return.
+    pub fn from_elements(elements: &ElementSet) -> Result<Self, Error> {
+        let satrec = init_satrec_from_elements(elements)?;
+        Ok(Satellite {
+            line1: String::new(),
+            line2: String::new(),
+            satrec: Box::new(satrec),
+        })
+    }
+
     /// Propagate to a time given as minutes since the TLE epoch.
     ///
     /// Calls the SGP4 step kernel directly with the supplied tsince — no JD
@@ -182,15 +242,50 @@ impl Satellite {
         self.propagate(MinutesSinceEpoch(tsince))
     }
 
-    /// Raw TLE line 1.
+    /// Raw TLE line 1. Returns an empty string when this `Satellite` was
+    /// constructed via `from_elements` (no source TLE).
     pub fn line1(&self) -> &str {
         &self.line1
     }
 
-    /// Raw TLE line 2.
+    /// Raw TLE line 2. Returns an empty string when this `Satellite` was
+    /// constructed via `from_elements` (no source TLE).
     pub fn line2(&self) -> &str {
         &self.line2
     }
+
+    /// Cached TLE epoch as a split Julian date `(jdsatepoch, jdsatepochF)`.
+    ///
+    /// Useful for computing time offsets between two TLEs without losing
+    /// precision through floating-point round-trips.
+    pub fn epoch_jd(&self) -> JulianDate {
+        JulianDate(self.satrec.jdsatepoch, self.satrec.jdsatepochF)
+    }
+}
+
+/// One-shot SGP4 propagation from pre-parsed elements.
+///
+/// Equivalent to `Satellite::from_elements(&e)?.propagate(t)` but without
+/// allocating a cached `Satellite`. Suitable for one-call use cases where
+/// the satellite record is not reused (e.g. NIF entry points that get
+/// elements + a single time per call).
+pub fn propagate_elements(
+    elements: &ElementSet,
+    t: MinutesSinceEpoch,
+) -> Result<Prediction, Error> {
+    let mut satrec = init_satrec_from_elements(elements)?;
+    let mut r = [0.0_f64; 3];
+    let mut v = [0.0_f64; 3];
+    let ok = vallado::sgp4(&mut satrec, t.0, &mut r, &mut v);
+    if !ok || satrec.error != 0 {
+        return Err(Error::Sgp4 {
+            code: satrec.error,
+        });
+    }
+    Ok(Prediction {
+        position: r,
+        velocity: v,
+    })
 }
 
 #[cfg(feature = "serde")]
@@ -218,6 +313,70 @@ impl<'de> serde::Deserialize<'de> for Satellite {
 }
 
 // ── Internal helpers ─────────────────────────────────────────────────
+
+/// Run `sgp4init` from a pre-parsed element set, returning the initialized
+/// satellite record. Performs the same angle/units conversion as
+/// `vallado::twoline2rv_propagate` so a `Satellite` constructed from
+/// elements is equivalent to one constructed from the matching TLE.
+fn init_satrec_from_elements(elements: &ElementSet) -> Result<vallado::ElsetRec, Error> {
+    let deg2rad = std::f64::consts::PI / 180.0;
+    let xpdotp = 1440.0 / (2.0 * std::f64::consts::PI);
+
+    let inclo = elements.inclination_deg * deg2rad;
+    let nodeo = elements.right_ascension_deg * deg2rad;
+    let argpo = elements.argument_of_perigee_deg * deg2rad;
+    let mo = elements.mean_anomaly_deg * deg2rad;
+    let no_kozai = elements.mean_motion_rev_per_day / xpdotp;
+    // ndot rev/day² → rad/min², nddot rev/day³ → rad/min³.
+    // Matches the conversion in `vallado::twoline2rv_propagate`.
+    let ndot = elements.mean_motion_dot / (xpdotp * 1440.0);
+    let nddot = elements.mean_motion_double_dot / (xpdotp * 1440.0 * 1440.0);
+
+    // Compute jdsatepoch / jdsatepochF the same way twoline2rv_propagate does
+    // (so a Satellite created via from_elements has the same epoch precision
+    // as one created via from_tle for the equivalent TLE).
+    let year_full = if elements.epoch_year_two_digit < 57 {
+        elements.epoch_year_two_digit + 2000
+    } else {
+        elements.epoch_year_two_digit + 1900
+    };
+    let (mon, day, hr, minute, sec) =
+        vallado::days2mdhms_SGP4(year_full, elements.epoch_days);
+    let (jd, jdfrac_raw) = vallado::jday_SGP4(year_full, mon, day, hr, minute, sec);
+    let jdfrac = (jdfrac_raw * 100_000_000.0).round() / 100_000_000.0;
+    let epoch_sgp4 = jd + jdfrac - 2433281.5;
+
+    let satnum_str = format!("{:>5}", elements.catalog_number);
+
+    let mut satrec = vallado::ElsetRec::default();
+    satrec.epochyr = elements.epoch_year_two_digit;
+    satrec.epochdays = elements.epoch_days;
+    satrec.jdsatepoch = jd;
+    satrec.jdsatepochF = jdfrac;
+
+    vallado::sgp4init(
+        vallado::GravConstType::Wgs72,
+        'i',
+        &satnum_str,
+        epoch_sgp4,
+        elements.bstar,
+        ndot,
+        nddot,
+        elements.eccentricity,
+        argpo,
+        inclo,
+        mo,
+        no_kozai,
+        nodeo,
+        &mut satrec,
+    );
+
+    // sgp4init may have rewritten jdsatepoch via initl — restore the split.
+    satrec.jdsatepoch = jd;
+    satrec.jdsatepochF = jdfrac;
+
+    Ok(satrec)
+}
 
 /// Parse a TLE and run `sgp4init`, returning the initialized satellite
 /// record. Mirrors the parse logic in `vallado::twoline2rv_propagate` exactly.

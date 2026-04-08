@@ -4,7 +4,9 @@
 //! opsmode 'i'. The pure-Rust port in `astrodynamics::sgp4` must match
 //! bit-for-bit (0 ULP) on every component.
 
-use astrodynamics::sgp4::{JulianDate, MinutesSinceEpoch, Satellite};
+use astrodynamics::sgp4::{
+    propagate_elements, ElementSet, JulianDate, MinutesSinceEpoch, Satellite,
+};
 
 fn hex_to_f64(s: &str) -> f64 {
     let (neg, rest) = if let Some(r) = s.strip_prefix("-0x") {
@@ -137,4 +139,133 @@ fn julian_date_propagation() {
 fn invalid_tle_rejected() {
     assert!(Satellite::from_tle("garbage", "data").is_err());
     assert!(Satellite::from_tle("1 short", "2 short").is_err());
+}
+
+/// Verifies that `Satellite::from_elements` (the pre-parsed-elements path
+/// added in 0.6.1) produces *bit-identical* propagation results to
+/// `Satellite::from_tle` (the TLE-string path) for the entire 33-satellite
+/// Vallado verification corpus. This locks down equivalence of the two
+/// public constructors.
+#[test]
+fn from_elements_matches_from_tle_bit_exact() {
+    let data: serde_json::Value =
+        serde_json::from_str(include_str!("sgp4_verification.json")).unwrap();
+
+    // The fixture's element bit-patterns are stored in *radians* (the SGP4
+    // internal-units form), but `ElementSet` takes degrees. We can't recover
+    // the exact deg → rad inputs from the radian bits without precision loss.
+    // Instead, parse the same TLE strings the fixture uses, then independently
+    // build an `ElementSet` directly from the TLE line slices and compare
+    // outputs to the from_tle path.
+    let mut total_checks = 0;
+    let mut mismatches = Vec::new();
+
+    for sat in data["satellites"].as_array().unwrap() {
+        let line1 = sat["line1"].as_str().unwrap();
+        let line2 = sat["line2"].as_str().unwrap();
+        let norad = sat["norad"].as_str().unwrap();
+
+        let from_tle = Satellite::from_tle(line1, line2).unwrap();
+
+        // Build the ElementSet by parsing the TLE the same way orbis does
+        // (Elixir-side string slicing into rev/day², rev/day³, deg, etc.).
+        let two_digit_year: i32 = line1[18..20].trim().parse().unwrap();
+        let epoch_days: f64 = line1[20..32].trim().parse().unwrap();
+        let mean_motion_dot: f64 = line1[33..43].trim().parse().unwrap();
+        let nddot_str = format!("{}.{}", &line1[44..45], &line1[45..50]);
+        let nddot_mantissa: f64 = nddot_str.trim().parse().unwrap_or(0.0);
+        let nexp: i32 = line1[50..52].trim().parse().unwrap_or(0);
+        let mean_motion_double_dot = nddot_mantissa * 10.0_f64.powi(nexp);
+        let bstar_str = format!("{}.{}", &line1[53..54], &line1[54..59]);
+        let bstar_mantissa: f64 = bstar_str.trim().parse().unwrap_or(0.0);
+        let ibexp: i32 = line1[59..61].trim().parse().unwrap_or(0);
+        let bstar = bstar_mantissa * 10.0_f64.powi(ibexp);
+
+        let inclination_deg: f64 = line2[8..16].trim().parse().unwrap();
+        let right_ascension_deg: f64 = line2[17..25].trim().parse().unwrap();
+        let ecco_str = format!("0.{}", line2[26..33].replace(' ', "0"));
+        let eccentricity: f64 = ecco_str.parse().unwrap();
+        let argument_of_perigee_deg: f64 = line2[34..42].trim().parse().unwrap();
+        let mean_anomaly_deg: f64 = line2[43..51].trim().parse().unwrap();
+        let mean_motion_rev_per_day: f64 = line2[52..63].trim().parse().unwrap();
+
+        let elements = ElementSet {
+            epoch_year_two_digit: two_digit_year,
+            epoch_days,
+            bstar,
+            mean_motion_dot,
+            mean_motion_double_dot,
+            eccentricity,
+            argument_of_perigee_deg,
+            inclination_deg,
+            mean_anomaly_deg,
+            mean_motion_rev_per_day,
+            right_ascension_deg,
+            catalog_number: 0,
+        };
+
+        let from_elem = Satellite::from_elements(&elements).unwrap();
+
+        for prop in sat["propagations"].as_array().unwrap() {
+            if prop.get("error").is_some() {
+                continue;
+            }
+            let tsince = prop["tsince"].as_f64().unwrap();
+            let pa = match from_tle.propagate(MinutesSinceEpoch(tsince)) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            let pb = match from_elem.propagate(MinutesSinceEpoch(tsince)) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            // Also exercise the one-shot propagate_elements free function.
+            let pc = propagate_elements(&elements, MinutesSinceEpoch(tsince)).unwrap();
+
+            for i in 0..3 {
+                total_checks += 1;
+                if pa.position[i].to_bits() != pb.position[i].to_bits()
+                    || pa.position[i].to_bits() != pc.position[i].to_bits()
+                {
+                    mismatches.push(format!(
+                        "{norad} t={tsince} pos[{i}] tle={:?} elem={:?} oneshot={:?}",
+                        pa.position[i], pb.position[i], pc.position[i]
+                    ));
+                }
+                if pa.velocity[i].to_bits() != pb.velocity[i].to_bits()
+                    || pa.velocity[i].to_bits() != pc.velocity[i].to_bits()
+                {
+                    mismatches.push(format!(
+                        "{norad} t={tsince} vel[{i}] tle={:?} elem={:?} oneshot={:?}",
+                        pa.velocity[i], pb.velocity[i], pc.velocity[i]
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        mismatches.is_empty(),
+        "{}/{} mismatches between from_tle and from_elements:\n{}",
+        mismatches.len(),
+        total_checks * 2,
+        mismatches.iter().take(20).cloned().collect::<Vec<_>>().join("\n")
+    );
+}
+
+#[test]
+fn epoch_jd_accessor() {
+    let sat = Satellite::from_tle(
+        "1 25544U 98067A   18184.80969102  .00001614  00000-0  31745-4 0  9993",
+        "2 25544  51.6414 295.8524 0003435 262.6267 204.2868 15.54005638121106",
+    )
+    .unwrap();
+    let epoch = sat.epoch_jd();
+    // TLE epoch field 184.80969102 → 2018 day-of-year 184.80969 = 2018-07-03
+    // 19:25 UTC ≈ JD 2458303.31.
+    let total = epoch.0 + epoch.1;
+    assert!(
+        (2458303.0..=2458304.0).contains(&total),
+        "epoch JD {total} outside expected range"
+    );
 }
